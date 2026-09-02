@@ -501,6 +501,22 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: rgba(124, 106, 247, 0.3); border-radius: 10px; }
 
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .backend-badge {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 12px; border-radius: 20px;
+      font-size: 0.78rem; font-weight: 600;
+      transition: all 0.3s ease;
+    }
+    .backend-badge.online {
+      background: rgba(18, 184, 134, 0.15); color: var(--accent3);
+      border: 1px solid rgba(18, 184, 134, 0.3);
+    }
+    .backend-badge.offline {
+      background: rgba(230, 73, 128, 0.15); color: var(--accent2);
+      border: 1px solid rgba(230, 73, 128, 0.3);
+    }
+
     @media (max-width: 860px) {
       header { padding: 14px 16px; flex-wrap: wrap; gap: 12px; }
       .container { padding: 16px 12px; }
@@ -538,6 +554,7 @@
     </nav>
 
     <div class="header-right">
+      <div id="apiStatusBadge" class="backend-badge offline" title="Database Sync Status">🟠 Checking Server...</div>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle Dark/Light Mode">
         <svg id="themeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
@@ -874,10 +891,88 @@
   }
   updateClock(); setInterval(updateClock, 1000);
 
-  // Storage
-  function saveTasks() {
+  // Backend REST API Integration & Persistence
+  var API_BASE = '/api';
+  var apiConnected = false;
+
+  async function apiFetchTasks() {
+    try {
+      var res = await fetch(API_BASE + '/tasks');
+      if (res.ok) {
+        var json = await res.json();
+        if (json.success) {
+          apiConnected = true;
+          updateApiBadge(true);
+          return json.data;
+        }
+      }
+    } catch (e) {
+      console.warn('Backend API unavailable, using localStorage fallback');
+    }
+    apiConnected = false;
+    updateApiBadge(false);
+    return null;
+  }
+
+  async function apiSaveTask(task) {
     localStorage.setItem('sf_tasks', JSON.stringify(tasks));
     updateSubjectFilterOptions();
+    if (!apiConnected || !task) return;
+    try {
+      await fetch(API_BASE + '/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(task)
+      });
+    } catch (e) {
+      console.warn('API save task error:', e);
+    }
+  }
+
+  async function apiDeleteTask(id) {
+    localStorage.setItem('sf_tasks', JSON.stringify(tasks));
+    updateSubjectFilterOptions();
+    if (!apiConnected || !id) return;
+    try {
+      await fetch(API_BASE + '/tasks/' + id, { method: 'DELETE' });
+    } catch (e) {
+      console.warn('API delete task error:', e);
+    }
+  }
+
+  async function apiBulkSync(taskList) {
+    if (!apiConnected) return;
+    try {
+      await fetch(API_BASE + '/tasks/bulk-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(taskList)
+      });
+    } catch (e) {
+      console.warn('API bulk sync error:', e);
+    }
+  }
+
+  function updateApiBadge(online) {
+    var badge = document.getElementById('apiStatusBadge');
+    if (!badge) return;
+    if (online) {
+      badge.className = 'backend-badge online';
+      badge.innerHTML = '🟢 <span>SQLite Backend Connected</span>';
+    } else {
+      badge.className = 'backend-badge offline';
+      badge.innerHTML = '🟠 <span>Offline / Local Mode</span>';
+    }
+  }
+
+  function saveTasks(updatedTask) {
+    localStorage.setItem('sf_tasks', JSON.stringify(tasks));
+    updateSubjectFilterOptions();
+    if (updatedTask) {
+      apiSaveTask(updatedTask);
+    } else {
+      apiBulkSync(tasks);
+    }
   }
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
@@ -1136,7 +1231,7 @@
     if (!t) return;
     t.done = !t.done;
     if (t.done) playSound('complete'); else playSound('click');
-    saveTasks(); renderApp();
+    saveTasks(t); renderApp();
     showToast(t.done ? 'Task marked as completed!' : 'Task reopened', t.done ? 'success' : 'info');
   }
 
@@ -1145,14 +1240,14 @@
     if (!t) return;
     t.pinned = !t.pinned;
     playSound('click');
-    saveTasks(); renderApp();
+    saveTasks(t); renderApp();
   }
 
   function toggleSubtask(taskId, index) {
     var t = tasks.find(function(x){ return x.id === taskId; });
     if (!t || !t.subtasks[index]) return;
     t.subtasks[index].done = !t.subtasks[index].done;
-    saveTasks(); renderApp();
+    saveTasks(t); renderApp();
   }
 
   function duplicateTask(id) {
@@ -1164,7 +1259,7 @@
     copy.createdAt = Date.now();
     tasks.push(copy);
     playSound('click');
-    saveTasks(); renderApp();
+    saveTasks(copy); renderApp();
     showToast('Task duplicated', 'info');
   }
 
@@ -1173,7 +1268,9 @@
     if (idx === -1) return;
     lastDeletedTask = tasks[idx];
     tasks.splice(idx, 1);
-    saveTasks(); renderApp();
+    localStorage.setItem('sf_tasks', JSON.stringify(tasks));
+    apiDeleteTask(id);
+    renderApp();
     playSound('click');
     showToast('Task deleted. <button class="toast-undo" onclick="undoDelete()">Undo</button>', 'danger');
   }
@@ -1181,8 +1278,9 @@
   function undoDelete() {
     if (lastDeletedTask) {
       tasks.push(lastDeletedTask);
+      saveTasks(lastDeletedTask);
       lastDeletedTask = null;
-      saveTasks(); renderApp();
+      renderApp();
       showToast('Task restored', 'success');
     }
   }
@@ -1276,9 +1374,11 @@
       subtasks: tempSubtasks
     };
 
+    var targetTaskObj;
     if (editingId) {
       var idx = tasks.findIndex(function(x){ return x.id === editingId; });
       tasks[idx] = Object.assign({}, tasks[idx], data);
+      targetTaskObj = tasks[idx];
       showToast('Task updated', 'info');
     } else {
       data.id = uid();
@@ -1287,11 +1387,12 @@
       data.status = 'todo';
       data.createdAt = Date.now();
       tasks.push(data);
+      targetTaskObj = data;
       playSound('click');
       showToast('New task added!', 'success');
     }
 
-    saveTasks();
+    saveTasks(targetTaskObj);
     renderApp();
     closeModal();
   }
@@ -1451,10 +1552,26 @@
   });
 
   // App Startup
-  initTheme();
-  seedDemo();
-  updateSubjectFilterOptions();
-  renderApp();
+  async function initApp() {
+    initTheme();
+    var remoteTasks = await apiFetchTasks();
+    if (remoteTasks !== null) {
+      if (remoteTasks.length > 0) {
+        tasks = remoteTasks;
+        localStorage.setItem('sf_tasks', JSON.stringify(tasks));
+      } else if (tasks.length > 0) {
+        await apiBulkSync(tasks);
+      } else {
+        seedDemo();
+        await apiBulkSync(tasks);
+      }
+    } else {
+      if (tasks.length === 0) seedDemo();
+    }
+    updateSubjectFilterOptions();
+    renderApp();
+  }
+  initApp();
 </script>
 </body>
 </html>
